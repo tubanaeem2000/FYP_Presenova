@@ -12,6 +12,9 @@ Key Features:
 
 import sys
 
+# Ensure site-packages from global user site do not leak into sys.path on Windows
+sys.path = [p for p in sys.path if "AppData\\Roaming\\Python" not in p and "AppData/Roaming/Python" not in p]
+
 # Force stdout/stderr to use UTF-8 encoding to prevent UnicodeEncodeError on Windows
 if hasattr(sys.stdout, 'reconfigure'):
     try:

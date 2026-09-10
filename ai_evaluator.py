@@ -4,6 +4,18 @@ Centralized Google Gemini 1.5 Flash analysis and smart fallbacks for all modules
 Now includes LanguageTool Cloud grammar pre-pass to enrich the 7Cs analysis.
 """
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import os
 import json
 import random
@@ -25,13 +37,13 @@ gemini_available = False
 
 if GEMINI_API_KEY and GEMINI_API_KEY != 'your-gemini-api-key-here':
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=GEMINI_API_KEY, transport='rest')
         gemini_available = True
-        print("✅ Global AI Evaluator: Gemini API configured successfully")
+        print("[AI OK] Global AI Evaluator: Gemini API configured successfully (REST)")
     except Exception as e:
-        print(f"⚠️ Global AI Evaluator: Failed to configure Gemini API: {str(e)}")
+        print(f"[AI WARN] Global AI Evaluator: Failed to configure Gemini API: {str(e)}")
 else:
-    print("⚠️ Global AI Evaluator: GEMINI_API_KEY not configured or placeholder used. Running with mock fallbacks.")
+    print("[AI WARN] Global AI Evaluator: GEMINI_API_KEY not configured or placeholder used. Running with smart fallbacks.")
 
 
 def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
@@ -382,12 +394,15 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
             "Consistent": f"Visual focus and body posture remained consistent (posture: {avg_posture}%) during delivery." if has_visual_metrics else "Consistency could not be scored from visual metrics because no valid video samples were captured."
         }
         
-    if insufficient_live_data:
+        if insufficient_live_data:
             fallback_json = {
                 "overall_score": 0,
                 "category_scores": {
                     "Structure": 0, "Clarity": 0, "Persuasion": 0,
-                    "Content_Quality": 0, "Call_to_Action": 0
+                    "Content_Quality": 0, "Call_to_Action": 0,
+                    "Grammar_and_Syntax": 0, "Accuracy": 0,
+                    "Tone_Appropriateness": 0, "Audience_Alignment": 0,
+                    "Purpose_Fulfillment": 0
                 },
                 "seven_cs_evaluation": {
                     c: "Not scored — no camera or microphone data was captured for this session."
@@ -404,6 +419,53 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
                 "qna_analysis": "No panelist interruptions occurred during this session.",
                 "detailed_feedback": "No usable video or audio data was captured during this session, so no delivery score could be generated. Check your camera and microphone permissions and try again.",
                 "improved_text": "No speech was captured during this session."
+            }
+        else:
+            # Full structured fallback with verified ratings from captured telemetry
+            clear_score = max(30, min(95, int((avg_eye * 0.6) + (85 if 120 <= avg_wpm <= 160 else 65) * 0.4))) if (has_visual_metrics or has_voice_metrics) else 70
+            concise_score = max(25, min(95, 100 - (fillers * 6) - (abs(avg_wpm - 140) // 2 if has_voice_metrics else 10)))
+            correct_score = computed_grammar_score
+            complete_score = max(30, min(95, avg_qna if has_qna_scores else (82 if len(text.split()) > 15 else 65)))
+            courteous_score = max(30, min(95, avg_posture if has_visual_metrics else 80))
+            concrete_score = max(30, min(95, int((overall_score * 0.5) + (avg_qna * 0.5 if has_qna_scores else 40))))
+            consistent_score = max(30, min(95, int((avg_eye * 0.5 + avg_posture * 0.5) if has_visual_metrics else 75)))
+
+            fallback_json = {
+                "overall_score": overall_score,
+                "category_scores": {
+                    "Structure": max(25, min(95, int(overall_score * 0.95))),
+                    "Clarity": clear_score,
+                    "Persuasion": max(25, min(95, int(avg_eye * 0.5 + avg_posture * 0.5 if has_visual_metrics else overall_score))),
+                    "Content_Quality": max(25, min(95, avg_qna if has_qna_scores else int(overall_score * 0.9))),
+                    "Call_to_Action": max(25, min(95, int(overall_score * 0.85))),
+                    "Grammar_and_Syntax": computed_grammar_score,
+                    "Accuracy": max(25, min(95, avg_qna if has_qna_scores else 80)),
+                    "Tone_Appropriateness": courteous_score,
+                    "Audience_Alignment": max(25, min(95, int(overall_score * 0.92))),
+                    "Purpose_Fulfillment": overall_score
+                },
+                "seven_cs_evaluation": seven_cs_eval,
+                "seven_cs_scores": {
+                    "Clear": clear_score,
+                    "Concise": concise_score,
+                    "Correct": correct_score,
+                    "Complete": complete_score,
+                    "Courteous": courteous_score,
+                    "Concrete": concrete_score,
+                    "Consistent": consistent_score
+                },
+                "strengths": strengths_list,
+                "recommendations": recs_list,
+                "qna_analysis": qna_feedback,
+                "detailed_feedback": (
+                    f"Live presentation analysis for topic '{context_metrics.get('topic', 'Live Practice')}': "
+                    f"Overall score achieved is {overall_score}/100. "
+                    f"{'Average eye contact was ' + str(avg_eye) + '% and posture was ' + str(avg_posture) + '%. ' if has_visual_metrics else 'Visual metrics were not detected. '}"
+                    f"{'Speaking rate averaged ' + str(avg_wpm) + ' WPM with ' + str(fillers) + ' filler words detected. ' if has_voice_metrics else ''}"
+                    f"{'Academic panelist Q&A score was ' + str(avg_qna) + '%. ' if has_qna_scores else ''}"
+                    f"Continue practicing to maintain high engagement and posture throughout your presentation."
+                ),
+                "improved_text": text if text and text != "No content provided." else f"Presentation rehearsal on topic: {context_metrics.get('topic', 'General')}"
             }
 
     # ===== BUILD DYNAMIC PROMPT FOR GEMINI =====
@@ -648,7 +710,7 @@ JSON Schema:
     # ===== RUN GEMINI INVOCATION =====
     if gemini_available and analysis_prompt:
         try:
-            model = genai.GenerativeModel(os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'))
+            model = genai.GenerativeModel(os.getenv('GEMINI_MODEL', 'gemini-1.5-flash'))
             response = model.generate_content(
                 analysis_prompt,
                 generation_config={

@@ -79,7 +79,7 @@ if GEMINI_API_KEY and not GEMINI_OFFLINE and current_genai is not None:
 
 if GEMINI_API_KEY and not GEMINI_OFFLINE and _new_client is None and legacy_genai is not None:
     try:
-        legacy_genai.configure(api_key=GEMINI_API_KEY)
+        legacy_genai.configure(api_key=GEMINI_API_KEY, transport='rest')
     except Exception as exc:
         logger.warning('[gemini_service] Legacy Gemini SDK configuration failed: %s', exc)
 

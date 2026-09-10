@@ -42,8 +42,13 @@ export const useLiveSession = ({ userId, videoRef }: UseLiveSessionProps) => {
   const connectSocket = () => {
     if (socketRef.current) return;
 
-    const socket = io('http://localhost:5000/ws/live-session', {
-      transports: ['websocket'],
+    const apiBase = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:5000/api';
+    const socketHost = apiBase.replace(/\/api\/?$/, '') || 'http://localhost:5000';
+
+    const socket = io(`${socketHost}/ws/live-session`, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
     });
 
     socket.on('connect', () => {

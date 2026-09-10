@@ -13,10 +13,6 @@ import sys
 import os
 from typing import List, Dict, Any
 
-site_packages = os.path.expanduser(r'~\AppData\Roaming\Python\Python314\site-packages')
-if os.path.exists(site_packages) and site_packages not in sys.path:
-    sys.path.insert(0, site_packages)
-
 logger = logging.getLogger(__name__)
 
 # Lazy imports for heavy ML libraries

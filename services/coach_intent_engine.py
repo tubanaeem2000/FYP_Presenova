@@ -10,11 +10,6 @@ import sys
 import os
 from typing import Dict, Any, Tuple
 
-# Ensure user site-packages directory is in sys.path
-site_packages = os.path.expanduser(r'~\AppData\Roaming\Python\Python314\site-packages')
-if os.path.exists(site_packages) and site_packages not in sys.path:
-    sys.path.insert(0, site_packages)
-
 logger = logging.getLogger(__name__)
 
 # Intent Training Dataset (~100 samples)

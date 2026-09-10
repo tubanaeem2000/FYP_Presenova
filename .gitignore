@@ -74,3 +74,10 @@ frontend/release/
 instance/
 .venv/
 
+
+# Project ZIP backups
+*.zip
+# Vite temporary file
+frontend/vite.config.ts.timestamp-*.mjs
+# Production environment
+frontend/.env.production

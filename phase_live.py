@@ -3,6 +3,18 @@ Phase Live: Live Presentation Coach & Live Analyzer
 Role: Handles real-time video/audio WebSocket streams and compiles the final scorecard with historical comparisons.
 """
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import os
 import json
 import base64
@@ -34,16 +46,40 @@ MEDIAPIPE_AVAILABLE = False
 MEDIAPIPE_IMPORTED = False
 MEDIAPIPE_VERSION = None
 MEDIAPIPE_IMPORT_ERROR = None
+MEDIAPIPE_MODE = None  # "solutions" or "tasks"
+
 try:
     import mediapipe as mp  # type: ignore
     MEDIAPIPE_IMPORTED = True
     MEDIAPIPE_VERSION = getattr(mp, "__version__", None)
+
+    # 1. Try legacy Solutions API (older MediaPipe)
     if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
         mp_face_mesh = mp.solutions.face_mesh
-        mp_pose = mp.solutions.pose
+        mp_pose = getattr(mp.solutions, "pose", None)
         MEDIAPIPE_AVAILABLE = True
+        MEDIAPIPE_MODE = "solutions"
     else:
-        MEDIAPIPE_IMPORT_ERROR = "Installed MediaPipe package does not expose mp.solutions.face_mesh."
+        # 2. Modern MediaPipe Tasks API (MediaPipe >= 0.10.14 / 1.0+)
+        try:
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision as mp_vision
+
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            task_paths = [
+                os.path.join(base_dir, "cascades", "face_landmarker.task"),
+                os.path.join(base_dir, "downloads", "face_landmarker.task"),
+            ]
+            task_model_path = next((p for p in task_paths if os.path.exists(p)), None)
+
+            if task_model_path:
+                MEDIAPIPE_AVAILABLE = True
+                MEDIAPIPE_MODE = "tasks"
+                MEDIAPIPE_IMPORT_ERROR = None
+            else:
+                MEDIAPIPE_IMPORT_ERROR = "MediaPipe face_landmarker.task model file not found."
+        except Exception as task_err:
+            MEDIAPIPE_IMPORT_ERROR = f"MediaPipe Tasks API unavailable: {str(task_err)}"
 except Exception as e:
     MEDIAPIPE_IMPORT_ERROR = str(e)
     print(f"[LIVE WARN] MediaPipe not available: {MEDIAPIPE_IMPORT_ERROR}")
@@ -62,7 +98,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 gemini_available = False
 if GEMINI_API_KEY and GEMINI_API_KEY != 'your-gemini-api-key-here':
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=GEMINI_API_KEY, transport='rest')
         gemini_available = True
     except Exception as e:
         print(f"[LIVE WARN] Failed to configure Gemini API: {str(e)}")
@@ -73,7 +109,7 @@ groq_client = None
 if GROQ_API_KEY and GROQ_API_KEY != 'your-groq-api-key-here':
     try:
         groq_client = Groq(api_key=GROQ_API_KEY)
-        print("✅ Groq API configured successfully for Live Presentation Coach")
+        print("[LIVE OK] Groq API configured successfully for Live Presentation Coach")
     except Exception as e:
         print(f"[LIVE WARN] Failed to configure Groq client: {str(e)}")
 
@@ -81,54 +117,96 @@ if GROQ_API_KEY and GROQ_API_KEY != 'your-groq-api-key-here':
 phase_live_bp = Blueprint('phase_live', __name__, url_prefix='/api/presentation')
 
 # ===== SCORING RELIABILITY THRESHOLDS (FIX) =====
-# A single valid frame/audio-chunk is not enough evidence to trust a metric.
-# These minimums prevent one lucky frame or one Whisper hallucination from
-# driving the whole session score.
-MIN_VALID_VIDEO_SAMPLES = 5     # need at least 5 good frames before trusting eye/posture avg
-MIN_VALID_AUDIO_SAMPLES = 3     # need at least 3 good audio chunks before trusting WPM avg
+# Minimum required samples to compute stable visual and audio averages
+MIN_VALID_VIDEO_SAMPLES = 3     # need at least 3 valid frames to trust visual presence
+MIN_VALID_AUDIO_SAMPLES = 1     # need at least 1 audio chunk to measure vocal delivery
 MIN_WORDS_PER_CHUNK = 2         # Whisper hallucinates 1-word phrases on silence/noise
 
 # ===== REAL-TIME FEATURE EXTRACTION FUNCTIONS =====
 
 face_cascade = None
+face_cascade_alt2 = None
+profile_cascade = None
 eye_cascade = None
 face_mesh_detector = None
 
 def init_cascades():
-    global face_cascade, eye_cascade
-    if OPENCV_AVAILABLE and face_cascade is None:
+    global face_cascade, face_cascade_alt2, profile_cascade, eye_cascade
+    if OPENCV_AVAILABLE and (face_cascade is None or face_cascade_alt2 is None):
         try:
+            local_cascades = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cascades")
             cascade_dir = getattr(cv2.data, "haarcascades", "")
-            face_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
-            eye_path = os.path.join(cascade_dir, "haarcascade_eye.xml")
 
-            if not os.path.exists(face_path) or not os.path.exists(eye_path):
-                print(f"[LIVE WARN] Haar Cascade files not found in OpenCV data path: {cascade_dir}")
-                face_cascade = None
-                eye_cascade = None
-                return
+            def get_path(filename):
+                local = os.path.join(local_cascades, filename)
+                if os.path.exists(local):
+                    return local
+                system = os.path.join(cascade_dir, filename)
+                if os.path.exists(system):
+                    return system
+                return None
 
-            face_cascade = cv2.CascadeClassifier(face_path)
-            eye_cascade = cv2.CascadeClassifier(eye_path)
-            if face_cascade.empty() or eye_cascade.empty():
-                print("[LIVE WARN] Haar Cascades failed to load. Cascades are empty.")
-                face_cascade = None
-                eye_cascade = None
+            alt2_path = get_path("haarcascade_frontalface_alt2.xml")
+            default_path = get_path("haarcascade_frontalface_default.xml")
+            profile_path = get_path("haarcascade_profileface.xml")
+            eye_path = get_path("haarcascade_eye.xml")
+
+            if alt2_path:
+                face_cascade_alt2 = cv2.CascadeClassifier(alt2_path)
+            if default_path:
+                face_cascade = cv2.CascadeClassifier(default_path)
+            if profile_path:
+                profile_cascade = cv2.CascadeClassifier(profile_path)
+            if eye_path:
+                eye_cascade = cv2.CascadeClassifier(eye_path)
+
+            print(f"[LIVE OK] Haar Cascades loaded: alt2={face_cascade_alt2 is not None}, default={face_cascade is not None}, eyes={eye_cascade is not None}")
         except Exception as e:
             print(f"[LIVE WARN] Failed to load OpenCV cascades: {str(e)}")
-            face_cascade = None
-            eye_cascade = None
 
 def init_face_mesh():
     global face_mesh_detector
-    if MEDIAPIPE_AVAILABLE and face_mesh_detector is None:
-        face_mesh_detector = mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+    if not MEDIAPIPE_AVAILABLE or face_mesh_detector is not None:
+        return
+
+    if MEDIAPIPE_MODE == "solutions":
+        try:
+            face_mesh_detector = mp_face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.35,
+                min_tracking_confidence=0.35
+            )
+            print("[LIVE OK] MediaPipe Solutions FaceMesh initialized!")
+        except Exception as e:
+            print(f"[LIVE WARN] Failed to init MediaPipe solutions FaceMesh: {e}")
+    elif MEDIAPIPE_MODE == "tasks":
+        try:
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision as mp_vision
+
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            task_paths = [
+                os.path.join(base_dir, "cascades", "face_landmarker.task"),
+                os.path.join(base_dir, "downloads", "face_landmarker.task"),
+            ]
+            task_model_path = next((p for p in task_paths if os.path.exists(p)), None)
+            if task_model_path:
+                base_options = mp_python.BaseOptions(model_asset_path=task_model_path)
+                options = mp_vision.FaceLandmarkerOptions(
+                    base_options=base_options,
+                    output_face_blendshapes=False,
+                    output_facial_transformation_matrixes=False,
+                    num_faces=1,
+                    min_face_detection_confidence=0.25,
+                    min_face_presence_confidence=0.25,
+                    min_tracking_confidence=0.25
+                )
+                face_mesh_detector = mp_vision.FaceLandmarker.create_from_options(options)
+                print("[LIVE OK] MediaPipe Tasks FaceLandmarker initialized successfully!")
+        except Exception as e:
+            print(f"[LIVE WARN] Failed to init MediaPipe Tasks FaceLandmarker: {e}")
 
 def _clip_score(value, low=0, high=100):
     return int(max(low, min(high, value)))
@@ -264,13 +342,51 @@ def _analyze_frame_with_mediapipe(img, session=None):
 
     h, w, _ = img.shape
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    rgb.flags.writeable = False
-    results = face_mesh_detector.process(rgb)
+    landmarks = None
 
-    if not results.multi_face_landmarks:
-        return _unmeasured_visual_result("Face not detected. Look at the camera and sit upright.")
+    if MEDIAPIPE_MODE == "solutions":
+        results = face_mesh_detector.process(rgb)
+        if results.multi_face_landmarks:
+            landmarks = results.multi_face_landmarks[0].landmark
+        else:
+            try:
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                l_channel, a_channel, b_channel = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
+                cl = clahe.apply(l_channel)
+                enhanced_bgr = cv2.cvtColor(cv2.merge((cl, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+                enhanced_rgb = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
+                res_retry = face_mesh_detector.process(enhanced_rgb)
+                if res_retry.multi_face_landmarks:
+                    landmarks = res_retry.multi_face_landmarks[0].landmark
+            except Exception:
+                pass
+    elif MEDIAPIPE_MODE == "tasks":
+        try:
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            results = face_mesh_detector.detect(mp_image)
+            if results.face_landmarks:
+                landmarks = results.face_landmarks[0]
+            else:
+                try:
+                    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                    l_channel, a_channel, b_channel = cv2.split(lab)
+                    clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
+                    cl = clahe.apply(l_channel)
+                    enhanced_bgr = cv2.cvtColor(cv2.merge((cl, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+                    enhanced_rgb = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
+                    mp_image_retry = mp.Image(image_format=mp.ImageFormat.SRGB, data=enhanced_rgb)
+                    res_retry = face_mesh_detector.detect(mp_image_retry)
+                    if res_retry.face_landmarks:
+                        landmarks = res_retry.face_landmarks[0]
+                except Exception:
+                    pass
+        except Exception:
+            landmarks = None
 
-    landmarks = results.multi_face_landmarks[0].landmark
+    if not landmarks:
+        # Crucial: return None so that Haar cascade detection with CLAHE runs as fallback!
+        return None
 
     def point(index):
         lm = landmarks[index]
@@ -401,15 +517,39 @@ def _analyze_frame_with_haar(img, session=None):
 
     h, w, _ = img.shape
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=4,
-        minSize=(40, 40)
-    )
+
+    # 1. CLAHE Adaptive Contrast Equalization (dramatically improves low-light webcams)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    enhanced_gray = clahe.apply(gray)
+
+    def _safe_detect(cascade, im, sf=1.15, mn=3, ms=(30, 30)):
+        if cascade is None or im is None:
+            return []
+        try:
+            res = cascade.detectMultiScale(im, scaleFactor=max(1.10, sf), minNeighbors=mn, minSize=ms)
+            return list(res) if len(res) > 0 else []
+        except Exception:
+            return []
+
+    faces = _safe_detect(face_cascade_alt2, enhanced_gray, sf=1.15, mn=3, ms=(30, 30))
 
     if len(faces) == 0:
-        return _unmeasured_visual_result("Face not detected. Look at the camera and sit upright.")
+        faces = _safe_detect(face_cascade, enhanced_gray, sf=1.15, mn=3, ms=(30, 30))
+
+    if len(faces) == 0:
+        faces = _safe_detect(face_cascade_alt2, gray, sf=1.15, mn=3, ms=(30, 30))
+
+    if len(faces) == 0:
+        faces = _safe_detect(profile_cascade, enhanced_gray, sf=1.18, mn=3, ms=(30, 30))
+
+    if len(faces) == 0:
+        eq_gray = cv2.equalizeHist(gray)
+        faces = _safe_detect(face_cascade_alt2, eq_gray, sf=1.15, mn=2, ms=(25, 25))
+        if len(faces) == 0:
+            faces = _safe_detect(face_cascade, eq_gray, sf=1.15, mn=2, ms=(25, 25))
+
+    if len(faces) == 0:
+        return _unmeasured_visual_result("Face not detected. Ensure adequate lighting and look at the camera.")
 
     fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
     face_cx = fx + fw / 2
@@ -426,21 +566,34 @@ def _analyze_frame_with_haar(img, session=None):
     size_penalty = 0
     if face_height_ratio < 0.2:
         size_penalty = min(20, (0.2 - face_height_ratio) * 100)
-    elif face_height_ratio > 0.55:
-        size_penalty = min(20, (face_height_ratio - 0.55) * 100)
+    elif face_height_ratio > 0.65:
+        size_penalty = min(15, (face_height_ratio - 0.65) * 80)
 
     posture_score = _clip_score(100 - x_penalty - y_penalty - size_penalty, 0, 100)
 
+    face_roi_enhanced = enhanced_gray[fy:fy + fh, fx:fx + fw]
     face_roi_gray = gray[fy:fy + fh, fx:fx + fw]
-    eyes = eye_cascade.detectMultiScale(
-        face_roi_gray,
-        scaleFactor=1.1,
-        minNeighbors=4,
-        minSize=(12, 12)
-    )
+    eyes = _safe_detect(eye_cascade, face_roi_enhanced, sf=1.12, mn=3, ms=(10, 10))
+    if len(eyes) == 0:
+        eyes = _safe_detect(eye_cascade, face_roi_gray, sf=1.12, mn=2, ms=(10, 10))
+
+    face_visibility = max(0.0, min(1.0, (fw * fh) / (w * h)))
 
     if len(eyes) == 0:
-        return _unmeasured_visual_result("Face not detected. Look at the camera and sit upright.")
+        # Face is clearly present! Position/posture is solid.
+        # Estimate eye contact based on head centering rather than dropping to 0.
+        centered_bonus = max(0, int(35 - dev_x * 100))
+        eye_contact_score = int(_clip_score(45 + centered_bonus, 30, 80))
+        hint = "Face detected. Look directly at the camera lens for optimal eye contact." if posture_score >= 70 else "Sit upright and look at the camera."
+        return _visual_result(
+            eye_contact_score,
+            posture_score,
+            hint,
+            emotion="Focused" if posture_score >= 70 else "Nervous",
+            session=session,
+            face_detected=True,
+            visibility_score=face_visibility
+        )
 
     face_area = fw * fh
     eye_metrics = []
@@ -480,12 +633,16 @@ def _analyze_frame_with_haar(img, session=None):
     avg_gaze_dev = sum(e["gaze_dev"] for e in eye_metrics) / len(eye_metrics)
     avg_center_offset = sum(e["horizontal_offset"] for e in eye_metrics) / len(eye_metrics)
 
-    # FIX: If gaze deviation is high or eyes are offset from camera center, score MUST be 0!
-    if avg_gaze_dev > 0.12 or avg_center_offset > 0.15 or len(eye_metrics) < 2:
-        eye_contact_score = 0
+    if len(eye_metrics) == 1:
+        # Single eye detected (slight head turn or shadow)
+        dev_penalty = min(50, avg_gaze_dev * 200 + avg_center_offset * 30)
+        eye_contact_score = int(_clip_score(70 - dev_penalty, 25, 80))
+    elif avg_gaze_dev > 0.18 or avg_center_offset > 0.22:
+        # User is looking significantly away from camera
+        eye_contact_score = 20
     else:
-        gaze_penalty = min(80, avg_gaze_dev * 220)
-        left_eye, right_eye = sorted(eye_metrics, key=lambda e: e["cx"])
+        gaze_penalty = min(70, avg_gaze_dev * 180)
+        left_eye, right_eye = sorted(eye_metrics[:2], key=lambda e: e["cx"])
         avg_visibility = (left_eye["visibility"] + right_eye["visibility"]) / 2
         vertical_alignment = 1.0 - min(1.0, abs(left_eye["cy"] - right_eye["cy"]) / max(1.0, fh * 0.08))
         symmetry = (
@@ -503,9 +660,7 @@ def _analyze_frame_with_haar(img, session=None):
             0.10 * symmetry +
             0.10 * distance_alignment
         )
-        eye_contact_score = int(_clip_score(base_raw_score - gaze_penalty, 0, 100))
-
-    face_visibility = max(0.0, min(1.0, (fw * fh) / (w * h)))
+        eye_contact_score = int(_clip_score(base_raw_score - gaze_penalty, 30, 100))
 
     if posture_score < 70:
         if dev_y > 0.15:
@@ -516,8 +671,8 @@ def _analyze_frame_with_haar(img, session=None):
             hint = "Move a bit closer to the camera."
         else:
             hint = "Adjust your posture to sit straight."
-    elif eye_contact_score < 70:
-        hint = "Try to look directly at the camera."
+    elif eye_contact_score < 60:
+        hint = "Look directly into the camera lens."
     else:
         hint = "Good eye contact and posture!"
 
@@ -710,10 +865,13 @@ def get_vision_status():
         "opencv_error": OPENCV_IMPORT_ERROR,
         "mediapipe_imported": MEDIAPIPE_IMPORTED,
         "mediapipe_available": MEDIAPIPE_AVAILABLE,
+        "mediapipe_mode": MEDIAPIPE_MODE,
         "mediapipe_version": MEDIAPIPE_VERSION,
         "mediapipe_error": MEDIAPIPE_IMPORT_ERROR,
         "haar_cascades_ready": cascade_ready,
-        "primary_analyzer": "mediapipe_face_mesh" if MEDIAPIPE_AVAILABLE else ("opencv_haar" if cascade_ready else None)
+        "primary_analyzer": (
+            f"mediapipe_{MEDIAPIPE_MODE}" if MEDIAPIPE_AVAILABLE else ("opencv_haar" if cascade_ready else None)
+        )
     }), 200
 
 

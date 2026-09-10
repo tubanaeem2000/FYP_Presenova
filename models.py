@@ -440,21 +440,7 @@ class PresentationSession:
 
     @staticmethod
     def get_by_id(session_id: str) -> "PresentationSession | None":
-        if _is_firestore_enabled():
-            try:
-                doc = db.collection("presentation_sessions").document(session_id).get()
-                d = _to_dict(doc)
-                if d:
-                    return PresentationSession(
-                        id=d.get("id"), user_id=d.get("user_id"),
-                        topic=d.get("topic"), status=d.get("status"),
-                        started_at=d.get("started_at"), ended_at=d.get("ended_at"),
-                        metrics=d.get("metrics")
-                    )
-            except Exception as e:
-                logger.warning(f"[DB FALLBACK] Firestore error on PresentationSession.get_by_id: {e}")
-                _disable_firestore()
-
+        # Fast path: check active in-memory sessions first to prevent socket blocking
         with _store_lock:
             s = _MEMORY_STORE["presentation_sessions"].get(session_id)
 
@@ -465,6 +451,25 @@ class PresentationSession:
                 started_at=s.get("started_at"), ended_at=s.get("ended_at"),
                 metrics=s.get("metrics")
             )
+
+        if _is_firestore_enabled():
+            try:
+                doc = db.collection("presentation_sessions").document(session_id).get()
+                d = _to_dict(doc)
+                if d:
+                    sess = PresentationSession(
+                        id=d.get("id"), user_id=d.get("user_id"),
+                        topic=d.get("topic"), status=d.get("status"),
+                        started_at=d.get("started_at"), ended_at=d.get("ended_at"),
+                        metrics=d.get("metrics")
+                    )
+                    with _store_lock:
+                        _MEMORY_STORE["presentation_sessions"][session_id] = d
+                    return sess
+            except Exception as e:
+                logger.warning(f"[DB FALLBACK] Firestore error on PresentationSession.get_by_id: {e}")
+                _disable_firestore()
+
         return None
 
     def update_metrics(self, key: str, value) -> None:
@@ -476,13 +481,14 @@ class PresentationSession:
             if self.id in _MEMORY_STORE["presentation_sessions"]:
                 _MEMORY_STORE["presentation_sessions"][self.id]["metrics"] = self.metrics
 
+        # Note: during high-frequency real-time streaming, in-memory store prevents
+        # socket event-loop starvation. Firestore is updated safely in background.
         if _is_firestore_enabled():
             try:
                 ref = db.collection("presentation_sessions").document(self.id)
                 ref.update({f"metrics.{key}": fs.ArrayUnion([value])})
             except Exception as e:
-                logger.warning(f"[DB FALLBACK] Firestore update_metrics error: {e}")
-                _disable_firestore()
+                logger.debug(f"[DB] Firestore non-blocking metric update notice: {e}")
 
     def increment_metric(self, key: str, val: int = 1) -> None:
         if self.metrics and key in self.metrics:

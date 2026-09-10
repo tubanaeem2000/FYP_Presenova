@@ -104,6 +104,6 @@ FALLBACK_FAILURE_THRESHOLD = 0.5  # Abort if >50% of items fail
 # ── Gemini Provider Defaults ────────────────────────────────────────────────
 GEMINI_DEFAULT_TIMEOUT = 45.0
 GEMINI_DEFAULT_MAX_RETRIES = 2
-GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
-GEMINI_DEFAULT_FALLBACK_MODELS = ["gemini-2.5-flash-lite"]
+GEMINI_DEFAULT_MODEL = "gemini-1.5-flash"
+GEMINI_DEFAULT_FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-1.5-pro"]
 

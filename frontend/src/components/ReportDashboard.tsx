@@ -60,16 +60,40 @@ const ReportDashboard: React.FC<ReportDashboardProps> = ({ report, onReset, rese
     return 'score-red';
   };
 
+  const cat = report?.category_scores || {
+    Structure: 0,
+    Clarity: 0,
+    Persuasion: 0,
+    Content_Quality: 0,
+    Call_to_Action: 0,
+  };
+
+  const metrics = report?.session_metrics || {
+    avg_eye_contact: 0,
+    avg_posture: 0,
+    avg_wpm: 0,
+    total_fillers: 0,
+    interruptions_handled: 0,
+    avg_confidence: 0,
+    avg_vocal_pitch: 0,
+  };
+
+  const comparison = report?.comparison || {
+    improved: false,
+    difference: 0,
+    note: 'Presentation session analysis completed.',
+  };
+
   return (
     <div className="report-dashboard fadeIn">
       {/* Header and Summary Scorecard */}
       <div className="dashboard-header-card">
         <div className="header-text">
           <h1>Presentation Feedback</h1>
-          <p className="topic-badge">Topic: {report.topic}</p>
+          <p className="topic-badge">Topic: {report?.topic || 'Live Practice'}</p>
         </div>
         <div className="score-badge-circle">
-          <div className="circle-score-val">{report.overall_score}</div>
+          <div className="circle-score-val">{report?.overall_score ?? 0}</div>
           <span className="circle-score-label">OVERALL</span>
         </div>
       </div>
@@ -79,10 +103,10 @@ const ReportDashboard: React.FC<ReportDashboardProps> = ({ report, onReset, rese
         <div className="comparison-header">
           <h3>Progress Analysis</h3>
         </div>
-        <p className="comp-note">{report.comparison.note}</p>
-        {report.comparison.difference !== 0 && (
-          <div className={`comp-diff-badge ${report.comparison.improved ? 'positive' : 'negative'}`}>
-            {report.comparison.improved ? '+' : ''}{report.comparison.difference} points vs last session
+        <p className="comp-note">{comparison.note}</p>
+        {comparison.difference !== 0 && (
+          <div className={`comp-diff-badge ${comparison.improved ? 'positive' : 'negative'}`}>
+            {comparison.improved ? '+' : ''}{comparison.difference} points vs last session
           </div>
         )}
       </div>
@@ -95,36 +119,36 @@ const ReportDashboard: React.FC<ReportDashboardProps> = ({ report, onReset, rese
           <div className="metric-row">
             <span>Structure (Flow & Organization)</span>
             <div className="progress-bar-container">
-              <div className="progress-bar-fill" style={{ width: `${report.category_scores.Structure}%`, backgroundColor: '#4f46e5' }}></div>
-              <span className="bar-val">{report.category_scores.Structure}%</span>
+              <div className="progress-bar-fill" style={{ width: `${cat.Structure ?? 0}%`, backgroundColor: '#4f46e5' }}></div>
+              <span className="bar-val">{cat.Structure ?? 0}%</span>
             </div>
           </div>
           <div className="metric-row">
             <span>Clarity (Vocabulary & Pacing)</span>
             <div className="progress-bar-container">
-              <div className="progress-bar-fill" style={{ width: `${report.category_scores.Clarity}%`, backgroundColor: '#8b5cf6' }}></div>
-              <span className="bar-val">{report.category_scores.Clarity}%</span>
+              <div className="progress-bar-fill" style={{ width: `${cat.Clarity ?? 0}%`, backgroundColor: '#8b5cf6' }}></div>
+              <span className="bar-val">{cat.Clarity ?? 0}%</span>
             </div>
           </div>
           <div className="metric-row">
             <span>Persuasion (Confidence & Conviction)</span>
             <div className="progress-bar-container">
-              <div className="progress-bar-fill" style={{ width: `${report.category_scores.Persuasion}%`, backgroundColor: '#ec4899' }}></div>
-              <span className="bar-val">{report.category_scores.Persuasion}%</span>
+              <div className="progress-bar-fill" style={{ width: `${cat.Persuasion ?? 0}%`, backgroundColor: '#ec4899' }}></div>
+              <span className="bar-val">{cat.Persuasion ?? 0}%</span>
             </div>
           </div>
           <div className="metric-row">
             <span>Content Quality (Depth & Answers)</span>
             <div className="progress-bar-container">
-              <div className="progress-bar-fill" style={{ width: `${report.category_scores.Content_Quality}%`, backgroundColor: '#10b981' }}></div>
-              <span className="bar-val">{report.category_scores.Content_Quality}%</span>
+              <div className="progress-bar-fill" style={{ width: `${cat.Content_Quality ?? 0}%`, backgroundColor: '#10b981' }}></div>
+              <span className="bar-val">{cat.Content_Quality ?? 0}%</span>
             </div>
           </div>
           <div className="metric-row">
             <span>Call to Action (Conclusion & Wrap-up)</span>
             <div className="progress-bar-container">
-              <div className="progress-bar-fill" style={{ width: `${report.category_scores.Call_to_Action}%`, backgroundColor: '#f59e0b' }}></div>
-              <span className="bar-val">{report.category_scores.Call_to_Action}%</span>
+              <div className="progress-bar-fill" style={{ width: `${cat.Call_to_Action ?? 0}%`, backgroundColor: '#f59e0b' }}></div>
+              <span className="bar-val">{cat.Call_to_Action ?? 0}%</span>
             </div>
           </div>
         </div>
@@ -135,28 +159,28 @@ const ReportDashboard: React.FC<ReportDashboardProps> = ({ report, onReset, rese
           <div className="telemetry-stats">
             <div className="telemetry-item">
               <span className="tel-label">Avg Eye Contact</span>
-              <span className="tel-val">{report.session_metrics.avg_eye_contact}%</span>
+              <span className="tel-val">{metrics.avg_eye_contact ?? 0}%</span>
             </div>
             <div className="telemetry-item">
               <span className="tel-label">Avg Posture</span>
-              <span className="tel-val">{report.session_metrics.avg_posture}%</span>
+              <span className="tel-val">{metrics.avg_posture ?? 0}%</span>
             </div>
             <div className="telemetry-item">
               <span className="tel-label">Avg Confidence</span>
-              <span className="tel-val">{report.session_metrics.avg_confidence !== undefined ? report.session_metrics.avg_confidence : 0}%</span>
+              <span className="tel-val">{metrics.avg_confidence ?? 0}%</span>
             </div>
             <div className="telemetry-item">
               <span className="tel-label">Vocal Pitch Dynamics</span>
-              <span className="tel-val">{report.session_metrics.avg_vocal_pitch !== undefined ? report.session_metrics.avg_vocal_pitch : 0}%</span>
+              <span className="tel-val">{metrics.avg_vocal_pitch ?? 0}%</span>
             </div>
             <div className="telemetry-item">
               <span className="tel-label">Avg Speaking Pace</span>
-              <span className="tel-val">{report.session_metrics.avg_wpm} WPM</span>
+              <span className="tel-val">{metrics.avg_wpm ?? 0} WPM</span>
             </div>
             <div className="telemetry-item">
               <span className="tel-label">Fillers Detected</span>
-              <span className={`tel-val ${report.session_metrics.total_fillers > 5 ? 'text-red' : ''}`}>
-                {report.session_metrics.total_fillers}
+              <span className={`tel-val ${(metrics.total_fillers ?? 0) > 5 ? 'text-red' : ''}`}>
+                {metrics.total_fillers ?? 0}
               </span>
             </div>
           </div>

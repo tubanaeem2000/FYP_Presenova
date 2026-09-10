@@ -17,6 +17,7 @@ python-pptx==1.0.2
 pypdf==5.0.1
 
 groq==0.11.0
+httpx==0.27.2
 flask-socketio==5.3.6
 
 opencv-contrib-python-headless==4.10.0.84

@@ -9,7 +9,8 @@ Key Features:
 - Blueprint-based modular architecture
 - Comprehensive error handling
 """
-
+import eventlet
+eventlet.monkey_patch()
 import sys
 
 # Ensure site-packages from global user site do not leak into sys.path on Windows
